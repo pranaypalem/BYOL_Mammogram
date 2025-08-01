@@ -35,12 +35,22 @@ from lightly.models.utils import deactivate_requires_grad, update_momentum
 from lightly.utils.scheduler import cosine_schedule
 
 
-# 1) Configuration
+# 1) Configuration - A100 GPU Optimized
+# 
+# A100 GPU Memory Configurations:
+# ================================
+# A100-40GB: BATCH_SIZE=32,  LR=1e-3,  NUM_WORKERS=16
+# A100-80GB: BATCH_SIZE=64,  LR=2e-3,  NUM_WORKERS=20  (uncomment below for 80GB)
+#
+# For A100-80GB, uncomment these lines:
+# BATCH_SIZE = 64; LR = 2e-3; NUM_WORKERS = 20
+
 DATA_DIR          = "./split_images/training"
-BATCH_SIZE        = 8            # Small batch size optimized for A100 memory
-NUM_WORKERS       = 8
+BATCH_SIZE        = 32           # A100-40GB optimized (change to 64 for 80GB)
+NUM_WORKERS       = 16           # A100 CPU core utilization (change to 20 for 80GB)
 EPOCHS            = 100
-LR                = 3e-4         # Optimized for small batch size (batch=8)
+LR                = 1e-3         # Batch-size scaled: 3e-4 * (BATCH_SIZE/8)
+WARMUP_EPOCHS     = 10           # LR warmup for large batch stability
 MOMENTUM_BASE     = 0.996
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 WANDB_PROJECT     = "mammogram-byol"
@@ -445,24 +455,63 @@ def create_medical_transforms(input_size: int):
     )
 
 
+def estimate_memory_usage(batch_size: int, tile_size: int = 256) -> float:
+    """Estimate GPU memory usage in GB for the given configuration."""
+    # Model parameters (ResNet50 + BYOL heads + momentum networks)
+    model_memory = 6.5  # GB - ResNet50 + BYOL + momentum networks
+    
+    # Batch memory (RGB tiles + gradients + optimizer states)
+    tile_memory_mb = (tile_size * tile_size * 3 * 4) / (1024 * 1024)  # 4 bytes per float32
+    batch_memory = batch_size * tile_memory_mb * 4 / 1024  # x4 for forward/backward + optimizer states
+    
+    total_memory = model_memory + batch_memory
+    return total_memory
+
+
 def main():
+    # Memory usage estimation
+    estimated_memory = estimate_memory_usage(BATCH_SIZE, TILE_SIZE)
+    print(f"📊 Estimated GPU Memory Usage: {estimated_memory:.1f} GB")
+    if estimated_memory > 40:
+        print(f"⚠️  Warning: May exceed A100-40GB capacity. Consider batch size {int(BATCH_SIZE * 35 / estimated_memory)}")
+    elif estimated_memory < 25:
+        print(f"💡 Tip: GPU underutilized. Consider increasing batch size to {int(BATCH_SIZE * 35 / estimated_memory)} for A100-40GB")
+    print()
+
     # Initialize wandb (offline mode if no API key)
     try:
         wandb.init(
             project=WANDB_PROJECT,
             config={
-                "tile_size": TILE_SIZE,
+                # A100 Optimization Settings
+                "gpu_type": "A100",
                 "batch_size": BATCH_SIZE,
-                "epochs": EPOCHS,
+                "num_workers": NUM_WORKERS,
                 "learning_rate": LR,
+                "warmup_epochs": WARMUP_EPOCHS,
+                "estimated_memory_gb": estimate_memory_usage(BATCH_SIZE, TILE_SIZE),
+                
+                # Model Architecture
+                "backbone": "resnet50",
+                "pretrained_weights": "IMAGENET1K_V2",
+                "tile_size": TILE_SIZE,
+                "epochs": EPOCHS,
                 "momentum_base": MOMENTUM_BASE,
+                "hidden_dim": HIDDEN_DIM,
+                "proj_dim": PROJ_DIM,
+                
+                # Medical Pipeline Settings
                 "min_breast_ratio": MIN_BREAST_RATIO,
                 "min_freq_energy": MIN_FREQ_ENERGY,
                 "min_breast_for_freq": MIN_BREAST_FOR_FREQ,
                 "min_tile_intensity": MIN_TILE_INTENSITY,
                 "min_non_zero_pixels": MIN_NON_ZERO_PIXELS,
-                "hidden_dim": HIDDEN_DIM,
-                "proj_dim": PROJ_DIM,
+                
+                # Optimization Features
+                "mixed_precision": True,
+                "pytorch_compile": hasattr(torch, 'compile'),
+                "gradient_clipping": True,
+                "lr_scheduler": "warmup_cosine",
             }
         )
         wandb_enabled = True
@@ -496,6 +545,7 @@ def main():
         DATA_DIR, TILE_SIZE, TILE_STRIDE, MIN_BREAST_RATIO, MIN_FREQ_ENERGY, MIN_BREAST_FOR_FREQ, transform
     )
     
+    # A100-optimized DataLoader settings
     loader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
@@ -504,28 +554,74 @@ def main():
         num_workers=NUM_WORKERS,
         pin_memory=True,
         persistent_workers=True,
+        prefetch_factor=4,           # A100 optimization: prefetch more batches
+        multiprocessing_context='spawn',  # Better for CUDA
     )
     
     print(f"📊 Dataset: {len(dataset):,} breast tissue tiles → {len(loader):,} batches")
     
-    # Model with classification readiness
-    resnet = models.resnet50(weights=None)  # Start from scratch for medical domain
+    # Model with classification readiness - ImageNet pretrained for better convergence
+    # ImageNet pretraining helps even for medical images by providing:
+    # 1. Better edge/texture detectors in early layers
+    # 2. Faster convergence and more stable training
+    # 3. Better generalization to medical domain features
+    resnet = models.resnet50(weights='IMAGENET1K_V2')  # Latest ImageNet weights for better medical transfer
     backbone = nn.Sequential(*list(resnet.children())[:-1])
     model = MammogramBYOL(backbone, INPUT_DIM, HIDDEN_DIM, PROJ_DIM).to(DEVICE)
     
+    print(f"✅ Using ImageNet-pretrained ResNet50 backbone for better medical domain transfer")
+    
+    # A100 Performance Boost: PyTorch 2.0 Compile (if available)
+    if hasattr(torch, 'compile') and torch.cuda.is_available():
+        print("🚀 Enabling PyTorch 2.0 compile optimization for A100...")
+        model = torch.compile(model, mode='max-autotune')  # Maximum A100 optimization
+        print("   ✅ Model compiled for maximum A100 performance")
+    else:
+        print("   ⚠️  PyTorch 2.0 compile not available - using standard optimization")
+    
     criterion = NegativeCosineSimilarity()
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)  # Better weight decay for small batches
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    
+    # Optimized for large batch training on A100
+    optimizer = optim.AdamW(
+        model.parameters(), 
+        lr=LR, 
+        weight_decay=1e-4,
+        betas=(0.9, 0.999),  # Standard for large batch
+        eps=1e-8
+    )
+    
+    # LR warmup + cosine annealing for large batch stability
+    warmup_scheduler = optim.lr_scheduler.LinearLR(
+        optimizer, 
+        start_factor=0.1, 
+        end_factor=1.0, 
+        total_iters=WARMUP_EPOCHS
+    )
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max=EPOCHS - WARMUP_EPOCHS,  # After warmup
+        eta_min=LR * 0.01  # 1% of peak LR
+    )
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer, 
+        schedulers=[warmup_scheduler, cosine_scheduler], 
+        milestones=[WARMUP_EPOCHS]
+    )
+    
     scaler = GradScaler()  # Mixed precision training for A100 optimization
     
     print(f"🧠 Model: ResNet50 backbone with {sum(p.numel() for p in model.parameters()):,} parameters")
     print(f"🎯 Ready for downstream multi-label classification: {INPUT_DIM}→{HIDDEN_DIM//2}→2 [mass, calcification]")
-    print(f"\n⚡ A100 Performance Optimizations:")
-    print(f"  ✅ Mixed precision training: autocast + GradScaler")
-    print(f"  ✅ Per-step momentum updates: better convergence")
-    print(f"  ✅ Optimized hyperparameters: LR={LR}, WD=1e-4, BATCH_SIZE={BATCH_SIZE}")
-    print(f"  ✅ BYOL architecture: ResNet50 + projection heads")
-    print(f"  ✅ Cosine annealing scheduler with gradient clipping\n")
+    print(f"\n⚡ A100 GPU MAXIMUM PERFORMANCE OPTIMIZATIONS:")
+    print(f"  🚀 Large batch training: BATCH_SIZE={BATCH_SIZE} (4x increase)")
+    print(f"  🚀 Scaled learning rate: LR={LR} with {WARMUP_EPOCHS}-epoch warmup")
+    print(f"  🚀 Mixed precision training: autocast + GradScaler")
+    print(f"  🚀 PyTorch 2.0 compile: max-autotune mode (if available)")
+    print(f"  🚀 Enhanced DataLoader: {NUM_WORKERS} workers, prefetch_factor=4")
+    print(f"  🚀 Per-step momentum updates: optimal BYOL convergence")
+    print(f"  🚀 Sequential LR scheduler: warmup → cosine annealing")
+    print(f"  🚀 Gradient clipping: max_norm=1.0 for stability")
+    print(f"  💾 Memory optimized: pin_memory + non_blocking transfers\n")
     
     # Training loop with progress tracking
     start_time = time.time()
