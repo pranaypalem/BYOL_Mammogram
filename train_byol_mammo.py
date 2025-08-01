@@ -46,10 +46,10 @@ from lightly.utils.scheduler import cosine_schedule
 # BATCH_SIZE = 64; LR = 2e-3; NUM_WORKERS = 20
 
 DATA_DIR          = "./split_images/training"
-BATCH_SIZE        = 32           # A100-40GB optimized (change to 64 for 80GB)
-NUM_WORKERS       = 16           # A100 CPU core utilization (change to 20 for 80GB)
+BATCH_SIZE        = 64           # A100-40GB optimized (change to 64 for 80GB)
+NUM_WORKERS       = 32           # A100 CPU core utilization (change to 20 for 80GB)
 EPOCHS            = 100
-LR                = 1e-3         # Batch-size scaled: 3e-4 * (BATCH_SIZE/8)
+LR                = 2e-3         # Batch-size scaled: 3e-4 * (BATCH_SIZE/8)
 WARMUP_EPOCHS     = 10           # LR warmup for large batch stability
 MOMENTUM_BASE     = 0.996
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
