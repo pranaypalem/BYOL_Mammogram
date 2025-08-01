@@ -50,6 +50,7 @@ TILE_SIZE         = 256          # px - maintain medical detail
 TILE_STRIDE       = 128          # px (50% overlap)
 MIN_BREAST_RATIO  = 0.1          # Lowered for micro-calcifications in peripheral regions
 MIN_FREQ_ENERGY   = 0.01         # Minimum high-frequency energy for calcification detection
+MIN_BREAST_FOR_FREQ = 0.05       # Minimum breast tissue required for frequency-based selection
 
 # Model settings for classification readiness
 HIDDEN_DIM        = 4096
@@ -117,12 +118,13 @@ def segment_breast_tissue(image_array: np.ndarray) -> np.ndarray:
 class BreastTileMammoDataset(Dataset):
     """Produces breast tissue tiles from mammograms with intelligent segmentation."""
     
-    def __init__(self, root: str, tile_size: int, stride: int, min_breast_ratio: float = 0.1, min_freq_energy: float = 0.01, transform=None):
+    def __init__(self, root: str, tile_size: int, stride: int, min_breast_ratio: float = 0.1, min_freq_energy: float = 0.01, min_breast_for_freq: float = 0.05, transform=None):
         self.transform = transform
         self.tile_size = tile_size
         self.stride = stride
         self.min_breast_ratio = min_breast_ratio
         self.min_freq_energy = min_freq_energy
+        self.min_breast_for_freq = min_breast_for_freq
         self.tiles = []  # (path, x, y, breast_ratio, freq_energy)
         
         img_paths = list(Path(root).glob("*.png"))
@@ -187,8 +189,11 @@ class BreastTileMammoDataset(Dataset):
             tile_image = image_array[y:y+self.tile_size, x:x+self.tile_size]
             freq_energy = compute_frequency_energy(tile_image)
             
-            # Keep tiles with sufficient breast tissue OR high-frequency content (for micro-calcifications)
-            if breast_ratio >= self.min_breast_ratio or freq_energy >= self.min_freq_energy:
+            # Smart tile selection logic:
+            # 1. High breast tissue ratio (normal case)
+            # 2. High frequency energy BUT only if there's some breast tissue (avoids pure edge artifacts)
+            if (breast_ratio >= self.min_breast_ratio or 
+                (freq_energy >= self.min_freq_energy and breast_ratio >= self.min_breast_for_freq)):
                 tiles.append((img_path, x, y, breast_ratio, freq_energy))
         
         return tiles
@@ -306,6 +311,7 @@ def main():
                 "momentum_base": MOMENTUM_BASE,
                 "min_breast_ratio": MIN_BREAST_RATIO,
                 "min_freq_energy": MIN_FREQ_ENERGY,
+                "min_breast_for_freq": MIN_BREAST_FOR_FREQ,
                 "hidden_dim": HIDDEN_DIM,
                 "proj_dim": PROJ_DIM,
             }
@@ -319,14 +325,15 @@ def main():
     print(f"Device: {DEVICE}")
     print(f"Tile size: {TILE_SIZE}x{TILE_SIZE} (medical resolution preserved)")
     print(f"Min breast tissue ratio: {MIN_BREAST_RATIO:.1%}")
-    print(f"Min frequency energy: {MIN_FREQ_ENERGY:.3f} (micro-calcification detection)\n")
+    print(f"Min frequency energy: {MIN_FREQ_ENERGY:.3f} (micro-calcification detection)")
+    print(f"Min breast for freq selection: {MIN_BREAST_FOR_FREQ:.1%} (avoids edge artifacts)\n")
     
     # Medical-optimized BYOL transforms
     transform = create_medical_transforms(TILE_SIZE)
     
     # Dataset with breast tissue segmentation and micro-calcification detection
     dataset = BreastTileMammoDataset(
-        DATA_DIR, TILE_SIZE, TILE_STRIDE, MIN_BREAST_RATIO, MIN_FREQ_ENERGY, transform
+        DATA_DIR, TILE_SIZE, TILE_STRIDE, MIN_BREAST_RATIO, MIN_FREQ_ENERGY, MIN_BREAST_FOR_FREQ, transform
     )
     
     loader = DataLoader(
