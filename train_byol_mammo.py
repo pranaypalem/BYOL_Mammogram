@@ -14,6 +14,7 @@ from typing import List, Tuple
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
+from torch.cuda.amp import autocast, GradScaler
 from PIL import Image
 from torchvision import models
 import numpy as np
@@ -36,10 +37,10 @@ from lightly.utils.scheduler import cosine_schedule
 
 # 1) Configuration
 DATA_DIR          = "./split_images/training"
-BATCH_SIZE        = 8            # Larger batch for better gradient estimates
+BATCH_SIZE        = 8            # Small batch size optimized for A100 memory
 NUM_WORKERS       = 8
 EPOCHS            = 100
-LR                = 0.001        # Lower LR for medical images
+LR                = 3e-4         # Optimized for small batch size (batch=8)
 MOMENTUM_BASE     = 0.996
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 WANDB_PROJECT     = "mammogram-byol"
@@ -47,12 +48,32 @@ WANDB_PROJECT     = "mammogram-byol"
 # Tile settings - preserve full resolution
 TILE_SIZE         = 256          # px - maintain medical detail
 TILE_STRIDE       = 128          # px (50% overlap)
-MIN_BREAST_RATIO  = 0.3          # Minimum breast tissue in tile
+MIN_BREAST_RATIO  = 0.1          # Lowered for micro-calcifications in peripheral regions
+MIN_FREQ_ENERGY   = 0.01         # Minimum high-frequency energy for calcification detection
 
 # Model settings for classification readiness
 HIDDEN_DIM        = 4096
 PROJ_DIM          = 256
 INPUT_DIM         = 2048
+
+
+def compute_frequency_energy(image_patch: np.ndarray) -> float:
+    """
+    Compute high-frequency energy using Laplacian of Gaussian (LoG) 
+    to detect micro-calcifications and other high-frequency structures.
+    """
+    if len(image_patch.shape) == 3:
+        gray = cv2.cvtColor(image_patch, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image_patch.copy()
+    
+    # Apply Laplacian of Gaussian for high-frequency detection
+    blurred = cv2.GaussianBlur(gray.astype(np.float32), (3, 3), 1.0)
+    laplacian = cv2.Laplacian(blurred, cv2.CV_32F, ksize=3)
+    
+    # Compute energy (normalized variance of high-frequency components)
+    energy = np.var(laplacian) / (np.mean(gray) + 1e-8)  # Normalized by intensity
+    return float(energy)
 
 
 def segment_breast_tissue(image_array: np.ndarray) -> np.ndarray:
@@ -96,12 +117,13 @@ def segment_breast_tissue(image_array: np.ndarray) -> np.ndarray:
 class BreastTileMammoDataset(Dataset):
     """Produces breast tissue tiles from mammograms with intelligent segmentation."""
     
-    def __init__(self, root: str, tile_size: int, stride: int, min_breast_ratio: float = 0.3, transform=None):
+    def __init__(self, root: str, tile_size: int, stride: int, min_breast_ratio: float = 0.1, min_freq_energy: float = 0.01, transform=None):
         self.transform = transform
         self.tile_size = tile_size
         self.stride = stride
         self.min_breast_ratio = min_breast_ratio
-        self.tiles = []  # (path, x, y, breast_ratio)
+        self.min_freq_energy = min_freq_energy
+        self.tiles = []  # (path, x, y, breast_ratio, freq_energy)
         
         img_paths = list(Path(root).glob("*.png"))
         if len(img_paths) == 0:
@@ -129,6 +151,7 @@ class BreastTileMammoDataset(Dataset):
         efficiency = (breast_tiles / total_tiles) * 100 if total_tiles > 0 else 0
         print(f"[Dataset] Generated {breast_tiles:,} breast tiles from {total_tiles:,} possible tiles ({efficiency:.1f}% efficiency)")
         print(f"[Dataset] Average breast tissue per tile: {np.mean([t[3] for t in self.tiles]):.1%}")
+        print(f"[Dataset] Average frequency energy per tile: {np.mean([t[4] for t in self.tiles]):.4f}")
     
     def _get_all_possible_tiles(self, shape: Tuple) -> List:
         """Get all possible tile positions for efficiency calculation."""
@@ -150,7 +173,7 @@ class BreastTileMammoDataset(Dataset):
         return positions
     
     def _extract_breast_tiles(self, image_array: np.ndarray, breast_mask: np.ndarray, img_path: Path) -> List:
-        """Extract tiles containing sufficient breast tissue."""
+        """Extract tiles containing sufficient breast tissue or high-frequency content (micro-calcifications)."""
         tiles = []
         
         positions = self._get_all_possible_tiles(image_array.shape)
@@ -160,9 +183,13 @@ class BreastTileMammoDataset(Dataset):
             tile_mask = breast_mask[y:y+self.tile_size, x:x+self.tile_size]
             breast_ratio = np.sum(tile_mask) / (self.tile_size * self.tile_size)
             
-            # Only keep tiles with sufficient breast tissue
-            if breast_ratio >= self.min_breast_ratio:
-                tiles.append((img_path, x, y, breast_ratio))
+            # Extract image tile for frequency analysis
+            tile_image = image_array[y:y+self.tile_size, x:x+self.tile_size]
+            freq_energy = compute_frequency_energy(tile_image)
+            
+            # Keep tiles with sufficient breast tissue OR high-frequency content (for micro-calcifications)
+            if breast_ratio >= self.min_breast_ratio or freq_energy >= self.min_freq_energy:
+                tiles.append((img_path, x, y, breast_ratio, freq_energy))
         
         return tiles
     
@@ -170,15 +197,17 @@ class BreastTileMammoDataset(Dataset):
         return len(self.tiles)
     
     def __getitem__(self, idx):
-        img_path, x, y, breast_ratio = self.tiles[idx]
+        img_path, x, y, breast_ratio, freq_energy = self.tiles[idx]
         
         with Image.open(img_path) as img:
             # Extract tile while preserving full resolution
             crop = img.crop((x, y, x + self.tile_size, y + self.tile_size))
             
-            # Convert to RGB but preserve medical image characteristics
-            if crop.mode != 'RGB':
-                crop = crop.convert('RGB')
+            # Keep as grayscale for medical imaging, convert to RGB by replicating channel
+            if crop.mode != 'L':
+                crop = crop.convert('L')
+            # Convert to RGB by replicating the grayscale channel
+            crop = crop.convert('RGB')
         
         # Apply BYOL transformations
         views = self.transform(crop)
@@ -195,12 +224,12 @@ class MammogramBYOL(nn.Module):
         self.projection_head = BYOLProjectionHead(input_dim, hidden_dim, proj_dim)
         self.prediction_head = BYOLPredictionHead(proj_dim, hidden_dim, proj_dim)
         
-        # Add classification head for downstream tasks
+        # Add classification head for downstream tasks (mass/calcification multi-label)
         self.classification_head = nn.Sequential(
             nn.Linear(input_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(hidden_dim // 2, 2)  # Binary classification (benign/malignant)
+            nn.Linear(hidden_dim // 2, 2)  # Multi-label classification: [mass, calcification]
         )
         
         # Momentum (target) networks
@@ -234,9 +263,29 @@ class MammogramBYOL(nn.Module):
 
 def create_medical_transforms(input_size: int):
     """Create BYOL transforms optimized for medical imaging."""
-    # Use default transforms with medical-appropriate settings
-    view1_transform = BYOLView1Transform(input_size=input_size)
-    view2_transform = BYOLView2Transform(input_size=input_size)
+    import torchvision.transforms as T
+    
+    # Medical-appropriate transforms for View 1 (lighter augmentations)
+    view1_transform = T.Compose([
+        T.ToTensor(),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomRotation(degrees=7, fill=0),  # Small rotations to preserve anatomy
+        T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0, hue=0),  # Mild brightness/contrast, no color
+        T.Resize(input_size, antialias=True),
+        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Grayscale-appropriate normalization for replicated channels
+    ])
+    
+    # Medical-appropriate transforms for View 2 (slightly stronger augmentations)  
+    view2_transform = T.Compose([
+        T.ToTensor(),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomRotation(degrees=7, fill=0),
+        T.ColorJitter(brightness=0.15, contrast=0.15, saturation=0, hue=0),  # Slightly stronger
+        T.RandomAffine(degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05), fill=0),  # Small translations/scaling
+        T.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),  # Very mild blur to preserve details
+        T.Resize(input_size, antialias=True),
+        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Grayscale-appropriate normalization for replicated channels
+    ])
     
     return BYOLTransform(
         view_1_transform=view1_transform,
@@ -256,6 +305,7 @@ def main():
                 "learning_rate": LR,
                 "momentum_base": MOMENTUM_BASE,
                 "min_breast_ratio": MIN_BREAST_RATIO,
+                "min_freq_energy": MIN_FREQ_ENERGY,
                 "hidden_dim": HIDDEN_DIM,
                 "proj_dim": PROJ_DIM,
             }
@@ -268,14 +318,15 @@ def main():
     print("🔬 Mammogram BYOL Training")
     print(f"Device: {DEVICE}")
     print(f"Tile size: {TILE_SIZE}x{TILE_SIZE} (medical resolution preserved)")
-    print(f"Min breast tissue ratio: {MIN_BREAST_RATIO:.1%}\n")
+    print(f"Min breast tissue ratio: {MIN_BREAST_RATIO:.1%}")
+    print(f"Min frequency energy: {MIN_FREQ_ENERGY:.3f} (micro-calcification detection)\n")
     
     # Medical-optimized BYOL transforms
     transform = create_medical_transforms(TILE_SIZE)
     
-    # Dataset with breast tissue segmentation
+    # Dataset with breast tissue segmentation and micro-calcification detection
     dataset = BreastTileMammoDataset(
-        DATA_DIR, TILE_SIZE, TILE_STRIDE, MIN_BREAST_RATIO, transform
+        DATA_DIR, TILE_SIZE, TILE_STRIDE, MIN_BREAST_RATIO, MIN_FREQ_ENERGY, transform
     )
     
     loader = DataLoader(
@@ -296,23 +347,23 @@ def main():
     model = MammogramBYOL(backbone, INPUT_DIM, HIDDEN_DIM, PROJ_DIM).to(DEVICE)
     
     criterion = NegativeCosineSimilarity()
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)  # Better weight decay for small batches
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    scaler = GradScaler()  # Mixed precision training for A100 optimization
     
     print(f"🧠 Model: ResNet50 backbone with {sum(p.numel() for p in model.parameters()):,} parameters")
-    print(f"🎯 Ready for downstream classification with {INPUT_DIM}→{HIDDEN_DIM//2}→2 head\n")
+    print(f"🎯 Ready for downstream multi-label classification: {INPUT_DIM}→{HIDDEN_DIM//2}→2 [mass, calcification]\n")
     
     # Training loop with progress tracking
     start_time = time.time()
     best_loss = float('inf')
+    global_step = 0
+    total_steps = EPOCHS * len(loader)
     
     for epoch in range(1, EPOCHS + 1):
         model.train()
         epoch_loss = 0.0
         breast_ratios = []
-        
-        # Momentum update schedule
-        momentum = cosine_schedule(epoch - 1, EPOCHS, MOMENTUM_BASE, 1.0)
         
         # Progress bar for epoch
         pbar = tqdm(loader, desc=f"Epoch {epoch:3d}/{EPOCHS}", leave=False)
@@ -321,24 +372,33 @@ def main():
             x0, x1 = views
             x0, x1 = x0.to(DEVICE, non_blocking=True), x1.to(DEVICE, non_blocking=True)
             
+            # Per-step momentum update schedule (BYOL best practice)
+            momentum = cosine_schedule(global_step, total_steps, MOMENTUM_BASE, 1.0)
+            
             # Update momentum networks
             update_momentum(model.backbone, model.backbone_momentum, momentum)
             update_momentum(model.projection_head, model.projection_head_momentum, momentum)
             
-            # BYOL forward passes
-            p0 = model(x0)
-            z1 = model.forward_momentum(x1)
-            p1 = model(x1)
-            z0 = model.forward_momentum(x0)
+            global_step += 1
             
-            # BYOL loss
-            loss = 0.5 * (criterion(p0, z1) + criterion(p1, z0))
+            # Mixed precision forward passes
+            with autocast():
+                # BYOL forward passes
+                p0 = model(x0)
+                z1 = model.forward_momentum(x1)
+                p1 = model(x1)
+                z0 = model.forward_momentum(x0)
+                
+                # BYOL loss
+                loss = 0.5 * (criterion(p0, z1) + criterion(p1, z0))
             
-            # Optimization step
+            # Mixed precision optimization step
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)  # Unscale before gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             
             # Metrics
             epoch_loss += loss.item()
