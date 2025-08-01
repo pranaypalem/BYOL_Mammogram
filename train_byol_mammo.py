@@ -45,12 +45,14 @@ MOMENTUM_BASE     = 0.996
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 WANDB_PROJECT     = "mammogram-byol"
 
-# Tile settings - preserve full resolution
+# Tile settings - preserve full resolution with AGGRESSIVE background rejection
 TILE_SIZE         = 256          # px - maintain medical detail
 TILE_STRIDE       = 128          # px (50% overlap)
-MIN_BREAST_RATIO  = 0.1          # Lowered for micro-calcifications in peripheral regions
-MIN_FREQ_ENERGY   = 0.02         # Minimum high-frequency energy (increased to avoid background noise)
-MIN_BREAST_FOR_FREQ = 0.08       # Minimum breast tissue required for frequency-based selection
+MIN_BREAST_RATIO  = 0.15         # INCREASED: More strict breast tissue requirement
+MIN_FREQ_ENERGY   = 0.03         # INCREASED: Much higher threshold to avoid background noise
+MIN_BREAST_FOR_FREQ = 0.12       # INCREASED: Even more breast tissue required for frequency selection
+MIN_TILE_INTENSITY = 40          # NEW: Minimum average intensity to avoid background
+MIN_NON_ZERO_PIXELS = 0.7        # NEW: At least 70% of pixels must be non-background
 
 # Model settings for classification readiness
 HIDDEN_DIM        = 4096
@@ -58,33 +60,71 @@ PROJ_DIM          = 256
 INPUT_DIM         = 2048
 
 
-def compute_frequency_energy(image_patch: np.ndarray) -> float:
+def is_background_tile(image_patch: np.ndarray) -> bool:
     """
-    Compute high-frequency energy using Laplacian of Gaussian (LoG) 
-    to detect micro-calcifications and other high-frequency structures.
-    Enhanced with background rejection.
+    Comprehensive background detection to reject empty/dark tiles.
     """
     if len(image_patch.shape) == 3:
         gray = cv2.cvtColor(image_patch, cv2.COLOR_RGB2GRAY)
     else:
         gray = image_patch.copy()
     
-    # Reject very dark patches (pure background)
+    # Multiple background rejection criteria
     mean_intensity = np.mean(gray)
-    if mean_intensity < 20:  # Very dark background
+    std_intensity = np.std(gray)
+    non_zero_pixels = np.sum(gray > 15)
+    total_pixels = gray.size
+    
+    # Criteria for background tiles:
+    # 1. Too dark overall
+    if mean_intensity < MIN_TILE_INTENSITY:
+        return True
+    
+    # 2. Too many near-zero pixels (empty space)
+    if non_zero_pixels / total_pixels < MIN_NON_ZERO_PIXELS:
+        return True
+    
+    # 3. Very low variation (uniform background)
+    if std_intensity < 10:
+        return True
+    
+    # 4. Check intensity distribution - reject if too skewed toward zero
+    histogram, _ = np.histogram(gray, bins=50, range=(0, 255))
+    if histogram[0] > total_pixels * 0.3:  # More than 30% pixels near zero
+        return True
+    
+    return False
+
+
+def compute_frequency_energy(image_patch: np.ndarray) -> float:
+    """
+    Compute high-frequency energy with AGGRESSIVE background rejection.
+    """
+    if len(image_patch.shape) == 3:
+        gray = cv2.cvtColor(image_patch, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image_patch.copy()
+    
+    # AGGRESSIVE background rejection
+    mean_intensity = np.mean(gray)
+    if mean_intensity < MIN_TILE_INTENSITY:  # Much stricter intensity threshold
+        return 0.0
+    
+    # Check for sufficient non-background pixels
+    non_zero_ratio = np.sum(gray > 15) / gray.size
+    if non_zero_ratio < MIN_NON_ZERO_PIXELS:  # Too much background
         return 0.0
     
     # Apply Laplacian of Gaussian for high-frequency detection
     blurred = cv2.GaussianBlur(gray.astype(np.float32), (3, 3), 1.0)
     laplacian = cv2.Laplacian(blurred, cv2.CV_32F, ksize=3)
     
-    # Focus on positive responses (bright spots, not dark edges)
+    # Focus only on positive responses (bright spots)
     positive_laplacian = np.maximum(laplacian, 0)
     
-    # Compute energy (normalized variance of high-frequency components)
-    # Only consider areas with sufficient intensity (avoid background noise)
-    mask = gray > (mean_intensity * 0.3)  # Focus on brighter regions
-    if np.sum(mask) < (gray.size * 0.1):  # Too little tissue
+    # Only analyze pixels with meaningful intensity
+    mask = gray > max(30, mean_intensity * 0.4)  # Much stricter tissue mask
+    if np.sum(mask) < (gray.size * 0.2):  # Need substantial tissue content
         return 0.0
     
     masked_laplacian = positive_laplacian[mask]
@@ -132,9 +172,9 @@ def segment_breast_tissue(image_array: np.ndarray) -> np.ndarray:
 
 
 class BreastTileMammoDataset(Dataset):
-    """Produces breast tissue tiles from mammograms with intelligent segmentation."""
+    """Produces breast tissue tiles from mammograms with AGGRESSIVE background rejection."""
     
-    def __init__(self, root: str, tile_size: int, stride: int, min_breast_ratio: float = 0.1, min_freq_energy: float = 0.01, min_breast_for_freq: float = 0.05, transform=None):
+    def __init__(self, root: str, tile_size: int, stride: int, min_breast_ratio: float = 0.15, min_freq_energy: float = 0.03, min_breast_for_freq: float = 0.12, transform=None):
         self.transform = transform
         self.tile_size = tile_size
         self.stride = stride
@@ -201,23 +241,27 @@ class BreastTileMammoDataset(Dataset):
             tile_mask = breast_mask[y:y+self.tile_size, x:x+self.tile_size]
             breast_ratio = np.sum(tile_mask) / (self.tile_size * self.tile_size)
             
-            # Extract image tile for frequency analysis
+            # Extract image tile for comprehensive analysis
             tile_image = image_array[y:y+self.tile_size, x:x+self.tile_size]
             
-            # Additional background rejection: check mean intensity
+            # STEP 1: Comprehensive background rejection
+            if is_background_tile(tile_image):
+                continue
+            
+            # STEP 2: Additional intensity check
             mean_intensity = np.mean(tile_image)
-            if mean_intensity < 25:  # Very dark tile (likely background)
+            if mean_intensity < MIN_TILE_INTENSITY:
                 continue
             
             freq_energy = compute_frequency_energy(tile_image)
             
-            # Enhanced tile selection logic:
+            # STEP 3: AGGRESSIVE tile selection logic
             # 1. High breast tissue ratio (normal case)
-            # 2. High frequency energy BUT only if there's meaningful breast tissue AND adequate intensity
+            # 2. High frequency energy BUT only with substantial breast tissue AND high intensity
             if (breast_ratio >= self.min_breast_ratio or 
                 (freq_energy >= self.min_freq_energy and 
                  breast_ratio >= self.min_breast_for_freq and 
-                 mean_intensity >= 30)):  # Additional intensity check for freq tiles
+                 mean_intensity >= MIN_TILE_INTENSITY + 10)):  # Even stricter for freq tiles
                 tiles.append((img_path, x, y, breast_ratio, freq_energy))
         
         return tiles
@@ -336,6 +380,8 @@ def main():
                 "min_breast_ratio": MIN_BREAST_RATIO,
                 "min_freq_energy": MIN_FREQ_ENERGY,
                 "min_breast_for_freq": MIN_BREAST_FOR_FREQ,
+                "min_tile_intensity": MIN_TILE_INTENSITY,
+                "min_non_zero_pixels": MIN_NON_ZERO_PIXELS,
                 "hidden_dim": HIDDEN_DIM,
                 "proj_dim": PROJ_DIM,
             }
@@ -345,18 +391,21 @@ def main():
         print(f"⚠️  WandB not configured, running offline. To enable: wandb login")
         wandb_enabled = False
     
-    print("🔬 Mammogram BYOL Training")
+    print("🔬 Mammogram BYOL Training with AGGRESSIVE Background Rejection")
     print(f"Device: {DEVICE}")
     print(f"Tile size: {TILE_SIZE}x{TILE_SIZE} (medical resolution preserved)")
-    print(f"Min breast tissue ratio: {MIN_BREAST_RATIO:.1%}")
-    print(f"Min frequency energy: {MIN_FREQ_ENERGY:.3f} (enhanced micro-calcification detection)")
-    print(f"Min breast for freq selection: {MIN_BREAST_FOR_FREQ:.1%} (avoids edge/background artifacts)")
-    print(f"Background rejection: intensity ≥25 (all tiles), ≥30 (frequency tiles)\n")
+    print(f"AGGRESSIVE thresholds:")
+    print(f"  • Min breast tissue ratio: {MIN_BREAST_RATIO:.1%}")
+    print(f"  • Min frequency energy: {MIN_FREQ_ENERGY:.3f}")
+    print(f"  • Min breast for freq selection: {MIN_BREAST_FOR_FREQ:.1%}")
+    print(f"  • Min tile intensity: {MIN_TILE_INTENSITY} (background rejection)")
+    print(f"  • Min non-zero pixels: {MIN_NON_ZERO_PIXELS:.0%} (empty space rejection)")
+    print(f"Background rejection: Multi-level filtering to eliminate empty space tiles\n")
     
     # Medical-optimized BYOL transforms
     transform = create_medical_transforms(TILE_SIZE)
     
-    # Dataset with breast tissue segmentation and micro-calcification detection
+    # Dataset with AGGRESSIVE background rejection and micro-calcification detection
     dataset = BreastTileMammoDataset(
         DATA_DIR, TILE_SIZE, TILE_STRIDE, MIN_BREAST_RATIO, MIN_FREQ_ENERGY, MIN_BREAST_FOR_FREQ, transform
     )
