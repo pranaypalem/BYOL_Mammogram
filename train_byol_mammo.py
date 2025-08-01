@@ -48,7 +48,7 @@ from lightly.utils.scheduler import cosine_schedule
 # BATCH_SIZE = 64; LR = 2e-3; NUM_WORKERS = 20
 
 DATA_DIR          = "./split_images/training"
-BATCH_SIZE        = 64           # A100-40GB optimized (change to 64 for 80GB)
+BATCH_SIZE        = 32           # A100 memory optimized (reduced from 64)
 NUM_WORKERS       = 16           # A100 CPU core utilization (system recommended max)
 EPOCHS            = 100
 LR                = 2e-3         # Batch-size scaled: 3e-4 * (BATCH_SIZE/8)
