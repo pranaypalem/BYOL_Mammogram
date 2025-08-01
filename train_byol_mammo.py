@@ -49,8 +49,8 @@ WANDB_PROJECT     = "mammogram-byol"
 TILE_SIZE         = 256          # px - maintain medical detail
 TILE_STRIDE       = 128          # px (50% overlap)
 MIN_BREAST_RATIO  = 0.1          # Lowered for micro-calcifications in peripheral regions
-MIN_FREQ_ENERGY   = 0.01         # Minimum high-frequency energy for calcification detection
-MIN_BREAST_FOR_FREQ = 0.05       # Minimum breast tissue required for frequency-based selection
+MIN_FREQ_ENERGY   = 0.02         # Minimum high-frequency energy (increased to avoid background noise)
+MIN_BREAST_FOR_FREQ = 0.08       # Minimum breast tissue required for frequency-based selection
 
 # Model settings for classification readiness
 HIDDEN_DIM        = 4096
@@ -62,18 +62,34 @@ def compute_frequency_energy(image_patch: np.ndarray) -> float:
     """
     Compute high-frequency energy using Laplacian of Gaussian (LoG) 
     to detect micro-calcifications and other high-frequency structures.
+    Enhanced with background rejection.
     """
     if len(image_patch.shape) == 3:
         gray = cv2.cvtColor(image_patch, cv2.COLOR_RGB2GRAY)
     else:
         gray = image_patch.copy()
     
+    # Reject very dark patches (pure background)
+    mean_intensity = np.mean(gray)
+    if mean_intensity < 20:  # Very dark background
+        return 0.0
+    
     # Apply Laplacian of Gaussian for high-frequency detection
     blurred = cv2.GaussianBlur(gray.astype(np.float32), (3, 3), 1.0)
     laplacian = cv2.Laplacian(blurred, cv2.CV_32F, ksize=3)
     
+    # Focus on positive responses (bright spots, not dark edges)
+    positive_laplacian = np.maximum(laplacian, 0)
+    
     # Compute energy (normalized variance of high-frequency components)
-    energy = np.var(laplacian) / (np.mean(gray) + 1e-8)  # Normalized by intensity
+    # Only consider areas with sufficient intensity (avoid background noise)
+    mask = gray > (mean_intensity * 0.3)  # Focus on brighter regions
+    if np.sum(mask) < (gray.size * 0.1):  # Too little tissue
+        return 0.0
+    
+    masked_laplacian = positive_laplacian[mask]
+    energy = np.var(masked_laplacian) / (mean_intensity + 1e-8)
+    
     return float(energy)
 
 
@@ -187,13 +203,21 @@ class BreastTileMammoDataset(Dataset):
             
             # Extract image tile for frequency analysis
             tile_image = image_array[y:y+self.tile_size, x:x+self.tile_size]
+            
+            # Additional background rejection: check mean intensity
+            mean_intensity = np.mean(tile_image)
+            if mean_intensity < 25:  # Very dark tile (likely background)
+                continue
+            
             freq_energy = compute_frequency_energy(tile_image)
             
-            # Smart tile selection logic:
+            # Enhanced tile selection logic:
             # 1. High breast tissue ratio (normal case)
-            # 2. High frequency energy BUT only if there's some breast tissue (avoids pure edge artifacts)
+            # 2. High frequency energy BUT only if there's meaningful breast tissue AND adequate intensity
             if (breast_ratio >= self.min_breast_ratio or 
-                (freq_energy >= self.min_freq_energy and breast_ratio >= self.min_breast_for_freq)):
+                (freq_energy >= self.min_freq_energy and 
+                 breast_ratio >= self.min_breast_for_freq and 
+                 mean_intensity >= 30)):  # Additional intensity check for freq tiles
                 tiles.append((img_path, x, y, breast_ratio, freq_energy))
         
         return tiles
@@ -325,8 +349,9 @@ def main():
     print(f"Device: {DEVICE}")
     print(f"Tile size: {TILE_SIZE}x{TILE_SIZE} (medical resolution preserved)")
     print(f"Min breast tissue ratio: {MIN_BREAST_RATIO:.1%}")
-    print(f"Min frequency energy: {MIN_FREQ_ENERGY:.3f} (micro-calcification detection)")
-    print(f"Min breast for freq selection: {MIN_BREAST_FOR_FREQ:.1%} (avoids edge artifacts)\n")
+    print(f"Min frequency energy: {MIN_FREQ_ENERGY:.3f} (enhanced micro-calcification detection)")
+    print(f"Min breast for freq selection: {MIN_BREAST_FOR_FREQ:.1%} (avoids edge/background artifacts)")
+    print(f"Background rejection: intensity ≥25 (all tiles), ≥30 (frequency tiles)\n")
     
     # Medical-optimized BYOL transforms
     transform = create_medical_transforms(TILE_SIZE)
