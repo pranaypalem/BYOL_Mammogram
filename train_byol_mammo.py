@@ -58,8 +58,8 @@ DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 WANDB_PROJECT     = "mammogram-byol"
 
 # Tile settings - preserve full resolution with AGGRESSIVE background rejection
-TILE_SIZE         = 256          # px - maintain medical detail
-TILE_STRIDE       = 128          # px (50% overlap)
+TILE_SIZE         = 512          # px - increased for fewer, higher quality tiles
+TILE_STRIDE       = 256          # px (50% overlap)
 MIN_BREAST_RATIO  = 0.15         # INCREASED: More strict breast tissue requirement
 MIN_FREQ_ENERGY   = 0.03         # INCREASED: Much higher threshold to avoid background noise
 MIN_BREAST_FOR_FREQ = 0.12       # INCREASED: Even more breast tissue required for frequency selection
@@ -463,29 +463,34 @@ class MammogramBYOL(nn.Module):
 
 
 def create_medical_transforms(input_size: int):
-    """Create BYOL transforms optimized for medical imaging."""
+    """Create BYOL transforms with stronger augmentations for effective self-supervised learning."""
     import torchvision.transforms as T
     
-    # Medical-appropriate transforms for View 1 (lighter augmentations)
+    # View 1: Moderate augmentations for medical safety
     view1_transform = T.Compose([
         T.ToTensor(),
         T.RandomHorizontalFlip(p=0.5),
-        T.RandomRotation(degrees=7, fill=0),  # Small rotations to preserve anatomy
-        T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0, hue=0),  # Mild brightness/contrast, no color
+        T.RandomVerticalFlip(p=0.2),  # Added vertical flip for more diversity
+        T.RandomRotation(degrees=15, fill=0),  # Increased rotation range
+        T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0, hue=0),  # Stronger brightness/contrast
+        T.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.85, 1.15), fill=0),  # More translation/scaling
         T.Resize(input_size, antialias=True),
-        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Grayscale-appropriate normalization for replicated channels
+        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     
-    # Medical-appropriate transforms for View 2 (slightly stronger augmentations)  
+    # View 2: Stronger augmentations for BYOL effectiveness
     view2_transform = T.Compose([
         T.ToTensor(),
         T.RandomHorizontalFlip(p=0.5),
-        T.RandomRotation(degrees=7, fill=0),
-        T.ColorJitter(brightness=0.15, contrast=0.15, saturation=0, hue=0),  # Slightly stronger
-        T.RandomAffine(degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05), fill=0),  # Small translations/scaling
-        T.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),  # Very mild blur to preserve details
+        T.RandomVerticalFlip(p=0.3),  # Higher chance for more diversity
+        T.RandomRotation(degrees=25, fill=0),  # Wider rotation range
+        T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0, hue=0),  # Standard BYOL intensity
+        T.RandomAffine(degrees=0, translate=(0.15, 0.15), scale=(0.8, 1.2), fill=0),  # More aggressive transforms
+        T.RandomPerspective(distortion_scale=0.1, p=0.3, fill=0),  # Add perspective distortion
+        T.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5)),  # Stronger blur range
+        T.RandomGrayscale(p=0.2),  # Convert to grayscale occasionally for more diversity
         T.Resize(input_size, antialias=True),
-        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Grayscale-appropriate normalization for replicated channels
+        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     
     return BYOLTransform(
@@ -561,7 +566,7 @@ def main():
     print("🔬 Mammogram BYOL Training with AGGRESSIVE Background Rejection")
     print("=" * 60)
     print(f"Device: {DEVICE}")
-    print(f"Tile size: {TILE_SIZE}x{TILE_SIZE} (medical resolution preserved)")
+    print(f"Tile size: {TILE_SIZE}x{TILE_SIZE} (increased for fewer, higher quality tiles)")
     print(f"Tile stride: {TILE_STRIDE} pixels ({TILE_STRIDE/TILE_SIZE*100:.0f}% overlap)")
     print(f"\n🔍 AGGRESSIVE Background Rejection Parameters:")
     print(f"  🛡️  MIN_BREAST_RATIO: {MIN_BREAST_RATIO:.1%} (increased from 0.3)")
@@ -569,11 +574,11 @@ def main():
     print(f"  🛡️  MIN_BREAST_FOR_FREQ: {MIN_BREAST_FOR_FREQ:.1%} (stricter for frequency tiles)")
     print(f"  🛡️  MIN_TILE_INTENSITY: {MIN_TILE_INTENSITY} (reject dark background)")
     print(f"  🛡️  MIN_NON_ZERO_PIXELS: {MIN_NON_ZERO_PIXELS:.1%} (reject empty space)")
-    print(f"\n🎛️ Medical-Optimized BYOL Augmentations:")
-    print(f"  ✅ View 1: Mild brightness/contrast (0.1/0.1), horizontal flip, ±7° rotation")
-    print(f"  ✅ View 2: Stronger brightness/contrast (0.15/0.15) + affine + blur")
-    print(f"  ✅ No solarization/strong color jitter: preserves medical details")
-    print(f"  ✅ Normalization: mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5] (grayscale-appropriate)")
+    print(f"\n🎛️ Enhanced BYOL Augmentations for Effective Self-Supervised Learning:")
+    print(f"  ✅ View 1: Moderate (brightness/contrast 0.3/0.3, ±15° rotation, scale 0.85-1.15)")
+    print(f"  ✅ View 2: Strong (brightness/contrast 0.4/0.4, ±25° rotation, perspective, blur)")
+    print(f"  ✅ Added: Vertical flips, random perspective, random grayscale for diversity")
+    print(f"  ✅ Balanced: Strong enough for BYOL while preserving medical details")
     print(f"\nMulti-level filtering eliminates ALL empty space tiles\n")
     
     # Medical-optimized BYOL transforms
