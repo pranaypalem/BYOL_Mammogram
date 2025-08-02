@@ -1,0 +1,13 @@
+{
+  "batch_size": 32,
+  "num_workers": 8,
+  "epochs": 50,
+  "lr_backbone": 1e-5,
+  "lr_head": 1e-3,
+  "weight_decay": 1e-4,
+  "warmup_epochs": 5,
+  "freeze_backbone_epochs": 10,
+  "label_smoothing": 0.1,
+  "dropout_rate": 0.3,
+  "gradient_clip": 1.0
+}

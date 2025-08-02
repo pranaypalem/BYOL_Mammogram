@@ -66,7 +66,7 @@ MIN_BREAST_FOR_FREQ = 0.12       # INCREASED: Even more breast tissue required f
 MIN_TILE_INTENSITY = 40          # NEW: Minimum average intensity to avoid background
 MIN_NON_ZERO_PIXELS = 0.7        # NEW: At least 70% of pixels must be non-background
 
-# Model settings for classification readiness
+# Model settings for BYOL pre-training
 HIDDEN_DIM        = 4096
 PROJ_DIM          = 256
 INPUT_DIM         = 2048
@@ -417,21 +417,13 @@ class BreastTileMammoDataset(Dataset):
 
 
 class MammogramBYOL(nn.Module):
-    """BYOL model adapted for mammogram classification readiness."""
+    """BYOL model for self-supervised pre-training on mammogram tiles."""
     
     def __init__(self, backbone, input_dim=2048, hidden_dim=4096, proj_dim=256):
         super().__init__()
         self.backbone = backbone
         self.projection_head = BYOLProjectionHead(input_dim, hidden_dim, proj_dim)
         self.prediction_head = BYOLPredictionHead(proj_dim, hidden_dim, proj_dim)
-        
-        # Add classification head for downstream tasks (mass/calcification multi-label)
-        self.classification_head = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim // 2, 2)  # Multi-label classification: [mass, calcification]
-        )
         
         # Momentum (target) networks
         self.backbone_momentum = copy.deepcopy(backbone)
@@ -452,14 +444,9 @@ class MammogramBYOL(nn.Module):
         return z.detach()
     
     def get_features(self, x):
-        """Extract features for downstream classification."""
+        """Extract backbone features (for downstream tasks)."""
         with torch.no_grad():
             return self.backbone(x).flatten(start_dim=1)
-    
-    def classify(self, x):
-        """Forward pass for classification (after BYOL training)."""
-        features = self.get_features(x)
-        return self.classification_head(features)
 
 
 def create_medical_transforms(input_size: int):
@@ -655,7 +642,7 @@ def main():
     scaler = GradScaler()  # Mixed precision training for A100 optimization
     
     print(f"🧠 Model: ResNet50 backbone with {sum(p.numel() for p in model.parameters()):,} parameters")
-    print(f"🎯 Ready for downstream multi-label classification: {INPUT_DIM}→{HIDDEN_DIM//2}→2 [mass, calcification]")
+    print(f"🎯 Ready for downstream tasks with {INPUT_DIM}D backbone features")
     print(f"\n⚡ A100 GPU MAXIMUM PERFORMANCE OPTIMIZATIONS:")
     print(f"  🚀 Large batch training: BATCH_SIZE={BATCH_SIZE} (4x increase)")
     print(f"  🚀 Scaled learning rate: LR={LR} with {WARMUP_EPOCHS}-epoch warmup")
@@ -787,7 +774,7 @@ def main():
     print(f"🛡️  AGGRESSIVE background rejection: Zero empty space contamination")
     print(f"🎛️  Medical-safe augmentations: Preserves anatomical details")
     print(f"⚡ A100 optimized: Mixed precision + per-step momentum updates")
-    print(f"🎯 Classification ready: Multi-label [mass, calcification] head")
+    print(f"🎯 Ready for downstream fine-tuning and classification tasks")
     print(f"🚀 Ready for downstream fine-tuning!")
     
     if wandb_enabled:
