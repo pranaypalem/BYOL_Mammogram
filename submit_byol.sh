@@ -27,7 +27,7 @@ export WANDB_API_KEY=b7934b8839e5fb629070ea9fe209d8324d82d293
 wandb login
 
 # Change to the directory of our script
-cd /home/pranaypalem/Documents/Breast_Cancer_Testing/Project/BYOL_Test
+cd /scratch/ppalem1/BYOL_Mammogram
 
 # Run the software/python script
 python train_byol_mammo.py
