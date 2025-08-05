@@ -1,17 +1,20 @@
 #!/bin/bash
 
-#SBATCH -N 1                    # number of nodes
-#SBATCH -c 16                   # number of cores 
-#SBATCH -t 6-00:00:00           # time in d-hh:mm:ss (6 days)
-#SBATCH -p general              # partition 
-#SBATCH -q public               # QOS
-#SBATCH --gres=gpu:a100:1       # request A100 GPU
-#SBATCH --mem=128G              # memory
-#SBATCH -o slurm.%j.out         # file to save job's STDOUT (%j = JobId)
-#SBATCH -e slurm.%j.err         # file to save job's STDERR (%j = JobId)
-#SBATCH --mail-type=ALL         # Send an e-mail when a job starts, stops, or fails
-#SBATCH --mail-user="%u@asu.edu"
-#SBATCH --export=NONE           # Purge the job-submitting shell environment
+#SBATCH --job-name=byol_training
+#SBATCH --account=grp_ataxr
+#SBATCH --partition=general
+#SBATCH --qos=public
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:a100:1
+#SBATCH --mem=128G
+#SBATCH --time=3-00:00:00
+#SBATCH --output=slurm_%j.out
+#SBATCH --error=slurm_%j.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=%u@asu.edu
+#SBATCH --export=NONE
 
 # Load required software
 module load mamba/latest
@@ -29,4 +32,6 @@ cd /home/pranaypalem/Documents/Breast_Cancer_Testing/Project/BYOL_Test
 # Run the software/python script
 python train_byol_mammo.py
 
-exit
+conda deactivate
+
+exit 0
