@@ -1,0 +1,166 @@
+📊 Estimated GPU Memory Usage: 6.9 GB
+💡 Tip: GPU underutilized. Consider increasing batch size to 162 for A100-40GB
+
+🔬 Mammogram BYOL Training with AGGRESSIVE Background Rejection
+============================================================
+Device: cuda
+Tile size: 512x512 (increased for fewer, higher quality tiles)
+Tile stride: 256 pixels (50% overlap)
+
+🔍 AGGRESSIVE Background Rejection Parameters:
+  🛡️  MIN_BREAST_RATIO: 15.0% (increased from 0.3)
+  🛡️  MIN_FREQ_ENERGY: 0.030 (much higher threshold)
+  🛡️  MIN_BREAST_FOR_FREQ: 12.0% (stricter for frequency tiles)
+  🛡️  MIN_TILE_INTENSITY: 40 (reject dark background)
+  🛡️  MIN_NON_ZERO_PIXELS: 70.0% (reject empty space)
+
+🎛️ Enhanced BYOL Augmentations for Effective Self-Supervised Learning:
+  ✅ View 1: Moderate (brightness/contrast 0.3/0.3, ±15° rotation, scale 0.85-1.15)
+  ✅ View 2: Strong (brightness/contrast 0.4/0.4, ±25° rotation, perspective, blur)
+  ✅ Added: Vertical flips, random perspective, random grayscale for diversity
+  ✅ Balanced: Strong enough for BYOL while preserving medical details
+
+Multi-level filtering eliminates ALL empty space tiles
+
+[Dataset] Cache miss: Extracting tiles from 16000 mammogram images...
+[Dataset] This will take ~57 minutes but will be cached for future runs...
+
+[Dataset] AGGRESSIVE Background Rejection Results:
+  • Generated 162,696 tiles from 240,000 possible (67.8% efficiency)
+  • Breast tissue method tiles: 162,696
+  • Frequency energy method tiles: 0
+  • Average breast tissue per tile: 91.1%
+  • Average frequency energy per tile: 0.0936
+  • Background contamination check: SKIPPED (pre-filtered during extraction)
+  ✅ All tiles passed AGGRESSIVE background rejection during extraction
+  ✅ Quality assured: Multi-level filtering eliminated empty space tiles
+[Dataset] 💾 Saving tiles to cache: tile_cache_55920292a499.pkl
+  ✅ Cache saved! Future runs will load instantly.
+📊 Dataset: 162,696 breast tissue tiles → 5,084 batches
+✅ Using ImageNet-pretrained ResNet50 backbone for better medical domain transfer
+🚀 Enabling PyTorch 2.0 compile optimization for A100...
+   ✅ Model compiled for maximum A100 performance
+🧠 Model: ResNet50 backbone with 68,012,928 parameters
+🎯 Ready for downstream tasks with 2048D backbone features
+
+⚡ A100 GPU MAXIMUM PERFORMANCE OPTIMIZATIONS:
+  🚀 Large batch training: BATCH_SIZE=32 (4x increase)
+  🚀 Scaled learning rate: LR=0.002 with 10-epoch warmup
+  🚀 Mixed precision training: autocast + GradScaler
+  🚀 PyTorch 2.0 compile: max-autotune mode (if available)
+  🚀 Enhanced DataLoader: 16 workers, prefetch_factor=4
+  🚀 Per-step momentum updates: optimal BYOL convergence
+  🚀 Sequential LR scheduler: warmup → cosine annealing
+  🚀 Gradient clipping: max_norm=1.0 for stability
+  💾 Memory optimized: pin_memory + non_blocking transfers
+
+Epoch   1/100 │ Loss: -0.9613 │ Breast: 91.1% │ 25.9min
+Epoch   2/100 │ Loss: -0.9766 │ Breast: 91.1% │ 46.4min
+Epoch   3/100 │ Loss: -0.9748 │ Breast: 91.1% │ 69.9min
+Epoch   4/100 │ Loss: -0.9758 │ Breast: 91.1% │ 89.4min
+Epoch   5/100 │ Loss: -0.9765 │ Breast: 91.1% │ 109.3min
+Epoch   6/100 │ Loss: -0.9761 │ Breast: 91.1% │ 128.8min
+Epoch   7/100 │ Loss: -0.9767 │ Breast: 91.1% │ 148.5min
+Epoch   8/100 │ Loss: -0.9763 │ Breast: 91.1% │ 168.3min
+Epoch   9/100 │ Loss: -0.9758 │ Breast: 91.1% │ 189.4min
+Epoch  10/100 │ Loss: -0.9778 │ Breast: 91.1% │ 209.0min
+Epoch  11/100 │ Loss: -0.9760 │ Breast: 91.1% │ 228.8min
+Epoch  12/100 │ Loss: -0.9773 │ Breast: 91.1% │ 248.5min
+Epoch  13/100 │ Loss: -0.9795 │ Breast: 91.1% │ 269.5min
+Epoch  14/100 │ Loss: -0.9791 │ Breast: 91.1% │ 291.6min
+Epoch  15/100 │ Loss: -0.9808 │ Breast: 91.1% │ 311.9min
+Epoch  16/100 │ Loss: -0.9834 │ Breast: 91.1% │ 331.8min
+Epoch  17/100 │ Loss: -0.9835 │ Breast: 91.1% │ 351.7min
+Epoch  18/100 │ Loss: -0.9843 │ Breast: 91.1% │ 372.2min
+Epoch  19/100 │ Loss: -0.9852 │ Breast: 91.1% │ 392.1min
+Epoch  20/100 │ Loss: -0.9843 │ Breast: 91.1% │ 412.0min
+Epoch  21/100 │ Loss: -0.9859 │ Breast: 91.1% │ 432.0min
+Epoch  22/100 │ Loss: -0.9858 │ Breast: 91.1% │ 452.1min
+Epoch  23/100 │ Loss: -0.9875 │ Breast: 91.1% │ 472.3min
+Epoch  24/100 │ Loss: -0.9872 │ Breast: 91.1% │ 492.3min
+Epoch  25/100 │ Loss: -0.9882 │ Breast: 91.1% │ 512.3min
+Epoch  26/100 │ Loss: -0.9880 │ Breast: 91.1% │ 532.6min
+Epoch  27/100 │ Loss: -0.9882 │ Breast: 91.1% │ 552.7min
+Epoch  28/100 │ Loss: -0.9893 │ Breast: 91.1% │ 572.5min
+Epoch  29/100 │ Loss: -0.9892 │ Breast: 91.1% │ 592.2min
+Epoch  30/100 │ Loss: -0.9899 │ Breast: 91.1% │ 611.9min
+Epoch  31/100 │ Loss: -0.9901 │ Breast: 91.1% │ 631.6min
+Epoch  32/100 │ Loss: -0.9909 │ Breast: 91.1% │ 651.6min
+Epoch  33/100 │ Loss: -0.9901 │ Breast: 91.1% │ 671.4min
+Epoch  34/100 │ Loss: -0.9909 │ Breast: 91.1% │ 690.9min
+Epoch  35/100 │ Loss: -0.9908 │ Breast: 91.1% │ 710.4min
+Epoch  36/100 │ Loss: -0.9903 │ Breast: 91.1% │ 729.9min
+Epoch  37/100 │ Loss: -0.9911 │ Breast: 91.1% │ 749.6min
+Epoch  38/100 │ Loss: -0.9913 │ Breast: 91.1% │ 769.3min
+Epoch  39/100 │ Loss: -0.9915 │ Breast: 91.1% │ 788.8min
+Epoch  40/100 │ Loss: -0.9912 │ Breast: 91.1% │ 808.6min
+Epoch  41/100 │ Loss: -0.9909 │ Breast: 91.1% │ 827.9min
+Epoch  42/100 │ Loss: -0.9915 │ Breast: 91.1% │ 847.1min
+Epoch  43/100 │ Loss: -0.9908 │ Breast: 91.1% │ 866.8min
+Epoch  44/100 │ Loss: -0.9915 │ Breast: 91.1% │ 886.0min
+Epoch  45/100 │ Loss: -0.9909 │ Breast: 91.1% │ 905.6min
+Epoch  46/100 │ Loss: -0.9917 │ Breast: 91.1% │ 924.9min
+Epoch  47/100 │ Loss: -0.9919 │ Breast: 91.1% │ 945.5min
+Epoch  48/100 │ Loss: -0.9916 │ Breast: 91.1% │ 965.2min
+Epoch  49/100 │ Loss: -0.9918 │ Breast: 91.1% │ 984.5min
+Epoch  50/100 │ Loss: -0.9923 │ Breast: 91.1% │ 1005.5min
+Epoch  51/100 │ Loss: -0.9927 │ Breast: 91.1% │ 1026.8min
+Epoch  52/100 │ Loss: -0.9931 │ Breast: 91.1% │ 1047.9min
+Epoch  53/100 │ Loss: -0.9934 │ Breast: 91.1% │ 1068.6min
+Epoch  54/100 │ Loss: -0.9935 │ Breast: 91.1% │ 1088.0min
+Epoch  55/100 │ Loss: -0.9934 │ Breast: 91.1% │ 1107.5min
+Epoch  56/100 │ Loss: -0.9938 │ Breast: 91.1% │ 1126.9min
+Epoch  57/100 │ Loss: -0.9941 │ Breast: 91.1% │ 1146.4min
+Epoch  58/100 │ Loss: -0.9939 │ Breast: 91.1% │ 1166.0min
+Epoch  59/100 │ Loss: -0.9940 │ Breast: 91.1% │ 1185.4min
+Epoch  60/100 │ Loss: -0.9941 │ Breast: 91.1% │ 1205.1min
+Epoch  61/100 │ Loss: -0.9943 │ Breast: 91.1% │ 1224.5min
+Epoch  62/100 │ Loss: -0.9943 │ Breast: 91.1% │ 1244.2min
+Epoch  63/100 │ Loss: -0.9947 │ Breast: 91.1% │ 1264.3min
+Epoch  64/100 │ Loss: -0.9948 │ Breast: 91.1% │ 1284.2min
+Epoch  65/100 │ Loss: -0.9950 │ Breast: 91.1% │ 1304.5min
+Epoch  66/100 │ Loss: -0.9950 │ Breast: 91.1% │ 1324.4min
+Epoch  67/100 │ Loss: -0.9952 │ Breast: 91.1% │ 1344.1min
+Epoch  68/100 │ Loss: -0.9952 │ Breast: 91.1% │ 1363.6min
+Epoch  69/100 │ Loss: -0.9952 │ Breast: 91.1% │ 1383.0min
+Epoch  70/100 │ Loss: -0.9953 │ Breast: 91.1% │ 1402.5min
+Epoch  71/100 │ Loss: -0.9952 │ Breast: 91.1% │ 1422.0min
+Epoch  72/100 │ Loss: -0.9954 │ Breast: 91.1% │ 1441.5min
+Epoch  73/100 │ Loss: -0.9955 │ Breast: 91.1% │ 1460.9min
+Epoch  74/100 │ Loss: -0.9956 │ Breast: 91.1% │ 1480.2min
+Epoch  75/100 │ Loss: -0.9958 │ Breast: 91.1% │ 1499.7min
+Epoch  76/100 │ Loss: -0.9959 │ Breast: 91.1% │ 1519.0min
+Epoch  77/100 │ Loss: -0.9961 │ Breast: 91.1% │ 1538.1min
+Epoch  78/100 │ Loss: -0.9962 │ Breast: 91.1% │ 1557.5min
+Epoch  79/100 │ Loss: -0.9963 │ Breast: 91.1% │ 1576.9min
+Epoch  80/100 │ Loss: -0.9964 │ Breast: 91.1% │ 1598.7min
+Epoch  81/100 │ Loss: -0.9965 │ Breast: 91.1% │ 1620.1min
+Epoch  82/100 │ Loss: -0.9965 │ Breast: 91.1% │ 1642.1min
+Epoch  83/100 │ Loss: -0.9966 │ Breast: 91.1% │ 1661.4min
+Epoch  84/100 │ Loss: -0.9967 │ Breast: 91.1% │ 1681.0min
+Epoch  85/100 │ Loss: -0.9968 │ Breast: 91.1% │ 1700.6min
+Epoch  86/100 │ Loss: -0.9968 │ Breast: 91.1% │ 1720.8min
+Epoch  87/100 │ Loss: -0.9968 │ Breast: 91.1% │ 1740.7min
+Epoch  88/100 │ Loss: -0.9968 │ Breast: 91.1% │ 1761.1min
+Epoch  89/100 │ Loss: -0.9969 │ Breast: 91.1% │ 1781.9min
+Epoch  90/100 │ Loss: -0.9970 │ Breast: 91.1% │ 1802.1min
+Epoch  91/100 │ Loss: -0.9970 │ Breast: 91.1% │ 1822.0min
+Epoch  92/100 │ Loss: -0.9970 │ Breast: 91.1% │ 1841.7min
+Epoch  93/100 │ Loss: -0.9971 │ Breast: 91.1% │ 1861.4min
+Epoch  94/100 │ Loss: -0.9971 │ Breast: 91.1% │ 1880.9min
+Epoch  95/100 │ Loss: -0.9971 │ Breast: 91.1% │ 1900.3min
+Epoch  96/100 │ Loss: -0.9971 │ Breast: 91.1% │ 1921.2min
+Epoch  97/100 │ Loss: -0.9972 │ Breast: 91.1% │ 1942.4min
+Epoch  98/100 │ Loss: -0.9972 │ Breast: 91.1% │ 1963.1min
+Epoch  99/100 │ Loss: -0.9972 │ Breast: 91.1% │ 1984.8min
+Epoch 100/100 │ Loss: -0.9972 │ Breast: 91.1% │ 2005.4min
+
+🏥 === MEDICAL-OPTIMIZED BYOL TRAINING COMPLETE ===
+⏱️  Total training time: 33.4 hours
+💾 Final model saved: mammogram_byol_final.pth
+📊 Dataset: 162,696 high-quality breast tissue tiles
+🛡️  AGGRESSIVE background rejection: Zero empty space contamination
+🎛️  Medical-safe augmentations: Preserves anatomical details
+⚡ A100 optimized: Mixed precision + per-step momentum updates
+🎯 Ready for downstream fine-tuning and classification tasks
+🚀 Ready for downstream fine-tuning!
