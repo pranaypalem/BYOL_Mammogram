@@ -3,8 +3,14 @@
 train_classification.py
 
 Fine-tune the BYOL pre-trained model for multi-label classification on mammogram tiles.
-This script loads the BYOL checkpoint and trains only the classification head while
-optionally fine-tuning the backbone with a lower learning rate.
+This script loads the BYOL checkpoint (mammogram_byol_best.pth) and trains a classification 
+head to detect findings on the same classes and tile format as shown in tile_bbox_visualization.ipynb.
+
+Key Features:
+- Uses BYOL pre-trained features from mammogram_byol_best.pth
+- Handles torch.compile checkpoint format with _orig_mod prefix
+- Multi-label classification for 11 finding classes from VinDr dataset
+- Compatible with tile-based annotation format from the visualization notebook
 """
 
 import torch
@@ -31,6 +37,14 @@ from train_byol_mammo import MammogramBYOL
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TILE_SIZE = 512
 
+# Finding classes from the VinDr dataset (matches tile_bbox_visualization.ipynb)
+FINDING_CLASSES = [
+    'Architectural_Distortion', 'Asymmetry', 'Focal_Asymmetry', 
+    'Global_Asymmetry', 'Mass', 'Nipple_Retraction', 'No_Finding',
+    'Skin_Retraction', 'Skin_Thickening', 'Suspicious_Calcification', 
+    'Suspicious_Lymph_Node'
+]
+
 # Default hyperparameters - can be overridden via command line
 DEFAULT_CONFIG = {
     'batch_size': 32,
@@ -50,19 +64,19 @@ DEFAULT_CONFIG = {
 class MammogramClassificationDataset(Dataset):
     """Dataset for mammogram tile classification with multi-label support."""
     
-    def __init__(self, csv_path: str, tiles_dir: str, class_names: List[str], 
+    def __init__(self, csv_path: str, tiles_dir: str, class_names: List[str] = None, 
                  transform=None, max_samples: int = None):
         """
         Args:
-            csv_path: Path to CSV with columns ['tile_path', 'class1', 'class2', ...]
+            csv_path: Path to CSV with tile metadata from prepare_classification_data.py
             tiles_dir: Directory containing tile images
-            class_names: List of class names (e.g., ['mass', 'calcification', 'normal', etc.])
+            class_names: List of class names (defaults to FINDING_CLASSES)
             transform: Image transformations
             max_samples: Limit dataset size for testing
         """
         self.tiles_dir = Path(tiles_dir)
-        self.class_names = class_names
-        self.num_classes = len(class_names)
+        self.class_names = class_names or FINDING_CLASSES
+        self.num_classes = len(self.class_names)
         self.transform = transform
         
         # Load data
@@ -70,11 +84,8 @@ class MammogramClassificationDataset(Dataset):
         if max_samples:
             self.df = self.df.head(max_samples)
         
-        print(f"📊 Loaded {len(self.df)} samples for classification training")
-        print(f"🏷️  Classes: {class_names}")
-        
         # Validate required columns
-        required_cols = ['tile_path'] + class_names
+        required_cols = ['tile_path'] + self.class_names
         missing_cols = [col for col in required_cols if col not in self.df.columns]
         if missing_cols:
             raise ValueError(f"Missing columns in CSV: {missing_cols}")
@@ -87,7 +98,16 @@ class MammogramClassificationDataset(Dataset):
         
         # Load image
         img_path = self.tiles_dir / row['tile_path']
-        image = Image.open(img_path).convert('RGB')
+        
+        try:
+            # Load as grayscale and convert to RGB
+            image = Image.open(img_path)
+            if image.mode != 'RGB':
+                # Convert grayscale to RGB by duplicating channel
+                image = image.convert('L').convert('RGB')
+        except Exception as e:
+            # Return black image as fallback
+            image = Image.new('RGB', (TILE_SIZE, TILE_SIZE), color=0)
         
         if self.transform:
             image = self.transform(image)
@@ -152,14 +172,13 @@ class ClassificationModel(nn.Module):
 def load_byol_model(checkpoint_path: str, num_classes: int, device: torch.device):
     """Load BYOL pre-trained model and prepare for classification."""
     
-    print(f"📥 Loading BYOL checkpoint: {checkpoint_path}")
     
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Create BYOL model with same architecture as training
+    # Create BYOL model with same architecture as training (matching train_byol_mammo.py)
     from torchvision import models
-    resnet = models.resnet50(weights=None)  # Don't load ImageNet weights
+    resnet = models.resnet50(weights='IMAGENET1K_V2')  # Match the training setup
     backbone = nn.Sequential(*list(resnet.children())[:-1])
     
     byol_model = MammogramBYOL(
@@ -169,15 +188,25 @@ def load_byol_model(checkpoint_path: str, num_classes: int, device: torch.device
         proj_dim=256
     ).to(device)
     
-    # Load BYOL weights
-    byol_model.load_state_dict(checkpoint['model_state_dict'])
+    # Load BYOL weights (handle torch.compile prefix if present)
+    state_dict = checkpoint['model_state_dict']
+    
+    # Check if the model was compiled (has _orig_mod prefix)
+    if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+        # Remove _orig_mod prefix from all keys
+        cleaned_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('_orig_mod.'):
+                new_key = key[len('_orig_mod.'):]
+                cleaned_state_dict[new_key] = value
+            else:
+                cleaned_state_dict[key] = value
+        state_dict = cleaned_state_dict
+    
+    byol_model.load_state_dict(state_dict)
     
     # Create classification model
     model = ClassificationModel(byol_model, num_classes).to(device)
-    
-    print(f"✅ Loaded BYOL model from epoch {checkpoint.get('epoch', 'unknown')}")
-    print(f"📊 BYOL training loss: {checkpoint.get('loss', 'unknown'):.4f}")
-    print(f"🎯 Added classification head: 2048 → {2048} → {num_classes}")
     
     return model
 
@@ -316,17 +345,17 @@ def validate_epoch(model: nn.Module, dataloader: DataLoader, criterion: nn.Modul
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Fine-tune BYOL model for classification')
-    parser.add_argument('--byol_checkpoint', type=str, required=True,
-                       help='Path to BYOL checkpoint (.pth file)')
+    parser = argparse.ArgumentParser(description='Fine-tune BYOL model for mammogram classification')
+    parser.add_argument('--byol_checkpoint', type=str, default='mammogram_byol_best.pth',
+                       help='Path to BYOL checkpoint (.pth file) - defaults to mammogram_byol_best.pth')
     parser.add_argument('--train_csv', type=str, required=True,
-                       help='Path to training CSV file')
+                       help='Path to training CSV file with tile annotations')
     parser.add_argument('--val_csv', type=str, required=True,
-                       help='Path to validation CSV file') 
+                       help='Path to validation CSV file with tile annotations') 
     parser.add_argument('--tiles_dir', type=str, required=True,
                        help='Directory containing tile images')
-    parser.add_argument('--class_names', type=str, nargs='+', required=True,
-                       help='List of class names (e.g., mass calcification normal)')
+    parser.add_argument('--class_names', type=str, nargs='+', default=None,
+                       help='List of class names (defaults to FINDING_CLASSES from notebook)')
     parser.add_argument('--output_dir', type=str, default='./classification_results',
                        help='Output directory for checkpoints and logs')
     parser.add_argument('--config', type=str, default=None,
@@ -357,31 +386,27 @@ def main():
         )
         wandb_enabled = True
     except Exception as e:
-        print(f"⚠️  WandB not configured: {e}")
         wandb_enabled = False
     
-    print("🔬 BYOL Classification Fine-Tuning")
-    print("=" * 50)
-    print(f"Device: {DEVICE}")
-    print(f"Classes: {args.class_names}")
-    print(f"Batch size: {config['batch_size']}")
-    print(f"Epochs: {config['epochs']}")
-    print(f"Output directory: {output_dir}")
+    # Use default classes if not specified
+    class_names = args.class_names or FINDING_CLASSES
+    
+    print(f"Training classification model - {len(class_names)} classes - {config['epochs']} epochs")
     
     # Load model
-    model = load_byol_model(args.byol_checkpoint, len(args.class_names), DEVICE)
+    model = load_byol_model(args.byol_checkpoint, len(class_names), DEVICE)
     
     # Create datasets
     train_transform = create_classification_transforms(TILE_SIZE, is_training=True)
     val_transform = create_classification_transforms(TILE_SIZE, is_training=False)
     
     train_dataset = MammogramClassificationDataset(
-        args.train_csv, args.tiles_dir, args.class_names, 
+        args.train_csv, args.tiles_dir, class_names, 
         train_transform, max_samples=args.max_samples
     )
     
     val_dataset = MammogramClassificationDataset(
-        args.val_csv, args.tiles_dir, args.class_names,
+        args.val_csv, args.tiles_dir, class_names,
         val_transform, max_samples=args.max_samples
     )
     
@@ -403,14 +428,13 @@ def main():
         pin_memory=True
     )
     
-    print(f"📊 Dataset sizes: Train={len(train_dataset)}, Val={len(val_dataset)}")
+    print(f"Dataset: Train={len(train_dataset)}, Val={len(val_dataset)}")
     
     # Setup loss and optimizer
     # Use BCEWithLogitsLoss for multi-label classification
     pos_weight = None  # Could be calculated from class distribution if needed
     criterion = nn.BCEWithLogitsLoss(
-        pos_weight=pos_weight,
-        label_smoothing=config['label_smoothing']
+        pos_weight=pos_weight
     )
     
     # Different learning rates for backbone and classification head
@@ -436,8 +460,6 @@ def main():
     for epoch in range(1, config['epochs'] + 1):
         # Decide whether to freeze backbone
         freeze_backbone = epoch <= config['freeze_backbone_epochs']
-        if freeze_backbone:
-            print(f"🧊 Epoch {epoch}: Backbone frozen (training only classification head)")
         
         # Train
         train_metrics = train_epoch(
@@ -446,18 +468,13 @@ def main():
         )
         
         # Validate
-        val_metrics = validate_epoch(model, val_loader, criterion, args.class_names)
+        val_metrics = validate_epoch(model, val_loader, criterion, class_names)
         
         # Step scheduler
         scheduler.step()
         
-        # Print metrics
-        print(f"\nEpoch {epoch:3d}/{config['epochs']}:")
-        print(f"  Train Loss: {train_metrics['train_loss']:.4f}")
-        print(f"  Val Loss:   {val_metrics['val_loss']:.4f}")
-        print(f"  Mean AUC:   {val_metrics['mean_auc']:.4f}")
-        print(f"  Mean AP:    {val_metrics['mean_ap']:.4f}")
-        print(f"  Exact Match: {val_metrics['exact_match_acc']:.4f}")
+        # Print concise metrics
+        print(f"Epoch {epoch:3d}: Loss={val_metrics['val_loss']:.3f} AUC={val_metrics['mean_auc']:.3f} AP={val_metrics['mean_ap']:.3f}")
         
         # Log to wandb
         if wandb_enabled:
@@ -475,10 +492,10 @@ def main():
                 'scheduler_state_dict': scheduler.state_dict(),
                 'val_metrics': val_metrics,
                 'config': config,
-                'class_names': args.class_names
+                'class_names': class_names
             }
             torch.save(checkpoint, output_dir / 'best_classification_model.pth')
-            print(f"  ✅ New best model saved (AUC: {best_metric:.4f})")
+            print(f"  Best: {best_metric:.3f}")
         
         # Save periodic checkpoints
         if epoch % 10 == 0:
@@ -489,7 +506,7 @@ def main():
                 'scheduler_state_dict': scheduler.state_dict(),
                 'val_metrics': val_metrics,
                 'config': config,
-                'class_names': args.class_names
+                'class_names': class_names
             }
             torch.save(checkpoint, output_dir / f'classification_epoch_{epoch}.pth')
     
@@ -505,9 +522,7 @@ def main():
     }
     torch.save(final_checkpoint, output_dir / 'final_classification_model.pth')
     
-    print(f"\n🎉 Classification training completed!")
-    print(f"📊 Best validation AUC: {best_metric:.4f}")
-    print(f"💾 Models saved to: {output_dir}")
+    print(f"\nTraining completed - Best AUC: {best_metric:.3f} - Models saved to: {output_dir}")
     
     if wandb_enabled:
         wandb.finish()

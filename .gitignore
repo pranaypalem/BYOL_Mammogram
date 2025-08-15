@@ -1,5 +1,6 @@
 # Dataset and large files
 split_images/
+classification_data/
 *.pth
 *.ckpt
 wandb/
