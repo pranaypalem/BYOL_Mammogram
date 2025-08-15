@@ -353,7 +353,9 @@ def main():
     parser.add_argument('--val_csv', type=str, required=True,
                        help='Path to validation CSV file with tile annotations') 
     parser.add_argument('--tiles_dir', type=str, required=True,
-                       help='Directory containing tile images')
+                       help='Directory containing training tile images')
+    parser.add_argument('--val_tiles_dir', type=str, default=None,
+                       help='Directory containing validation tile images (defaults to tiles_dir)')
     parser.add_argument('--class_names', type=str, nargs='+', default=None,
                        help='List of class names (defaults to FINDING_CLASSES from notebook)')
     parser.add_argument('--output_dir', type=str, default='./classification_results',
@@ -405,8 +407,9 @@ def main():
         train_transform, max_samples=args.max_samples
     )
     
+    val_tiles_dir = args.val_tiles_dir or args.tiles_dir
     val_dataset = MammogramClassificationDataset(
-        args.val_csv, args.tiles_dir, class_names,
+        args.val_csv, val_tiles_dir, class_names,
         val_transform, max_samples=args.max_samples
     )
     
